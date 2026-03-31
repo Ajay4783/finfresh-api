@@ -135,3 +135,51 @@ def get_transactions(user_id: str = Depends(get_current_user)):
         })
         
     return {"data": data}
+
+@app.get("/health-score")
+def get_health_score(user_id: str = Depends(get_current_user)):
+    from bson import ObjectId
+    query = {"userId": ObjectId(user_id)}
+    transactions = list(db.transactions.find(query))
+    
+    # 1. Varavu, Selavu, Investment ellam kooturathu (Sum calculation)
+    total_income = sum(t["amount"] for t in transactions if t.get("type") == "income")
+    total_expense = sum(t["amount"] for t in transactions if t.get("type") == "expense")
+    total_investment = sum(t["amount"] for t in transactions if t.get("type") == "investment")
+    
+    # 2. Health Score Logic
+    if total_income == 0:
+        score = 0
+        status = "Need Data"
+        tip = "Please add your income to calculate the health score."
+    else:
+        # Meetham irukkum panam (Savings)
+        savings = total_income - total_expense
+        savings_percentage = (savings / total_income) * 100
+        
+        if savings_percentage >= 30:
+            score = 90
+            status = "Excellent"
+            tip = "Great job! You have a very healthy savings rate. Keep investing!"
+        elif savings_percentage >= 15:
+            score = 70
+            status = "Good"
+            tip = "You are doing well, but try to cut down unnecessary expenses to reach a 30% savings rate."
+        elif savings_percentage >= 0:
+            score = 50
+            status = "Needs Improvement"
+            tip = "Warning: You are spending almost everything you earn. Start budgeting!"
+        else:
+            score = 30
+            status = "Critical"
+            tip = "DANGER: You are spending more than you earn! High risk of debt."
+            
+    return {
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "total_investment": total_investment,
+        "savings_percentage": round(savings_percentage, 2) if total_income > 0 else 0,
+        "health_score": score,
+        "status": status,
+        "financial_tip": tip
+    }
