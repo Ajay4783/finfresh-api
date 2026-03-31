@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
 export default function Dashboard() {
@@ -6,6 +7,15 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [health, setHealth] = useState(null);
   const [formData, setFormData] = useState({ type: 'income', category: '', amount: '', date: '', description: '' });
+  const navigate = useNavigate();
+
+const handleLogout = () => {
+  // 1. Browser-la irukka token-a azhikkurom
+  localStorage.removeItem('token');
+  
+  // 2. User-a login page-ku thallurom
+  navigate('/login');
+};
 
   const token = localStorage.getItem('token');
 
@@ -42,7 +52,15 @@ export default function Dashboard() {
 
   return (
     <div style={{ padding: '30px', fontFamily: 'sans-serif', maxWidth: '1000px', margin: 'auto' }}>
-      <h1>FinFresh Dashboard</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+  <h1>FinFresh Dashboard</h1>
+  <button 
+    onClick={handleLogout} 
+    style={{ padding: '10px 20px', background: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}
+  >
+    Logout
+  </button>
+</div>
       
       {/* 1. Summary Cards (New Feature) */}
       {summary && (
