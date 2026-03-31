@@ -1,9 +1,12 @@
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+from bson import ObjectId
+from jose import jwt, JWTError
 
 import models
 import auth
@@ -23,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB Connection - Link varalana alert aagum
+# MongoDB Connection
 mongo_url = os.getenv("MONGODB_URL")
 if not mongo_url:
     print("ALERT: MONGODB_URL is missing! Check your .env file.")
@@ -77,3 +80,58 @@ def login_user(user: models.UserLogin):
         "token": access_token,
         "user": {"id": user_id, "name": db_user["name"], "email": db_user["email"]}
     }
+
+# --- TOKEN VERIFICATION ---
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, os.getenv("JWT_SECRET", "fallback_secret"), algorithms=["HS256"])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# --- TRANSACTIONS API ---
+@app.post("/transactions", status_code=status.HTTP_201_CREATED)
+def create_transaction(transaction: models.TransactionCreate, user_id: str = Depends(get_current_user)):
+    new_txn = {
+        "userId": ObjectId(user_id),
+        "type": transaction.type.value,
+        "category": transaction.category,
+        "amount": transaction.amount,
+        "date": datetime.combine(transaction.date, datetime.min.time()),
+        "description": transaction.description,
+        "createdAt": datetime.utcnow()
+    }
+    
+    result = db.transactions.insert_one(new_txn)
+    
+    return {
+        "id": str(result.inserted_id),
+        "type": transaction.type,
+        "category": transaction.category,
+        "amount": transaction.amount,
+        "date": transaction.date,
+        "description": transaction.description
+    }
+
+@app.get("/transactions")
+def get_transactions(user_id: str = Depends(get_current_user)):
+    query = {"userId": ObjectId(user_id)}
+    cursor = db.transactions.find(query).sort("date", -1)
+    
+    data = []
+    for doc in cursor:
+        data.append({
+            "id": str(doc["_id"]),
+            "type": doc["type"],
+            "category": doc["category"],
+            "amount": doc["amount"],
+            "date": doc["date"].strftime("%Y-%m-%d"),
+            "description": doc.get("description", "")
+        })
+        
+    return {"data": data}
