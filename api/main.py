@@ -4,23 +4,23 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 from jose import jwt, JWTError
 
 import models
 import auth
 
-# --- PUTHU CODE: Force Load .env ---
+# --- Load Environment ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-# -----------------------------------
 
 app = FastAPI(title="FinFresh API")
 
+# --- CORS (React Frontend-ku allow panrathu) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,60 +28,10 @@ app.add_middleware(
 
 # MongoDB Connection
 mongo_url = os.getenv("MONGODB_URL")
-if not mongo_url:
-    print("ALERT: MONGODB_URL is missing! Check your .env file.")
-    
 client = MongoClient(mongo_url)
 db = client.finfresh_db
 
-@app.get("/")
-def read_root():
-    return {"message": "FinFresh API is running!"}
-
-# --- AUTH ENDPOINTS ---
-
-@app.post("/auth/register", status_code=status.HTTP_201_CREATED)
-def register_user(user: models.UserRegister):
-    existing_user = db.users.find_one({"email": user.email})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_pw = auth.get_password_hash(user.password)
-    
-    new_user = {
-        "name": user.name,
-        "email": user.email,
-        "passwordHash": hashed_pw,
-        "createdAt": datetime.utcnow()
-    }
-    result = db.users.insert_one(new_user)
-    
-    user_id = str(result.inserted_id)
-    access_token = auth.create_access_token(data={"sub": user_id})
-    
-    return {
-        "token": access_token,
-        "user": {"id": user_id, "name": user.name, "email": user.email}
-    }
-
-@app.post("/auth/login")
-def login_user(user: models.UserLogin):
-    db_user = db.users.find_one({"email": user.email})
-    if not db_user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    if not auth.verify_password(user.password, db_user["passwordHash"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    user_id = str(db_user["_id"])
-    access_token = auth.create_access_token(data={"sub": user_id})
-    
-    return {
-        "token": access_token,
-        "user": {"id": user_id, "name": db_user["name"], "email": db_user["email"]}
-    }
-
-# --- TOKEN VERIFICATION ---
+# --- AUTH LOGIC (JWT) ---
 security = HTTPBearer()
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -94,7 +44,39 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# --- TRANSACTIONS API ---
+@app.get("/")
+def read_root():
+    return {"message": "FinFresh API is running!"}
+
+# --- AUTH ENDPOINTS ---
+@app.post("/auth/register", status_code=status.HTTP_201_CREATED)
+def register_user(user: models.UserRegister):
+    if db.users.find_one({"email": user.email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    hashed_pw = auth.get_password_hash(user.password)
+    new_user = {
+        "name": user.name,
+        "email": user.email,
+        "passwordHash": hashed_pw,
+        "createdAt": datetime.utcnow()
+    }
+    result = db.users.insert_one(new_user)
+    user_id = str(result.inserted_id)
+    token = auth.create_access_token(data={"sub": user_id})
+    return {"token": token, "user": {"id": user_id, "name": user.name, "email": user.email}}
+
+@app.post("/auth/login")
+def login_user(user: models.UserLogin):
+    db_user = db.users.find_one({"email": user.email})
+    if not db_user or not auth.verify_password(user.password, db_user["passwordHash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    user_id = str(db_user["_id"])
+    token = auth.create_access_token(data={"sub": user_id})
+    return {"token": token, "user": {"id": user_id, "name": db_user["name"], "email": db_user["email"]}}
+
+# --- TRANSACTIONS ---
 @app.post("/transactions", status_code=status.HTTP_201_CREATED)
 def create_transaction(transaction: models.TransactionCreate, user_id: str = Depends(get_current_user)):
     new_txn = {
@@ -106,22 +88,14 @@ def create_transaction(transaction: models.TransactionCreate, user_id: str = Dep
         "description": transaction.description,
         "createdAt": datetime.utcnow()
     }
-    
     result = db.transactions.insert_one(new_txn)
-    
-    return {
-        "id": str(result.inserted_id),
-        "type": transaction.type,
-        "category": transaction.category,
-        "amount": transaction.amount,
-        "date": transaction.date,
-        "description": transaction.description
-    }
+    return {"id": str(result.inserted_id), **transaction.dict()}
 
 @app.get("/transactions")
-def get_transactions(user_id: str = Depends(get_current_user)):
+def get_transactions(user_id: str = Depends(get_current_user), page: int = 1, limit: int = 20):
     query = {"userId": ObjectId(user_id)}
-    cursor = db.transactions.find(query).sort("date", -1)
+    cursor = db.transactions.find(query).sort("date", -1).skip((page-1)*limit).limit(limit)
+    total = db.transactions.count_documents(query)
     
     data = []
     for doc in cursor:
@@ -133,53 +107,73 @@ def get_transactions(user_id: str = Depends(get_current_user)):
             "date": doc["date"].strftime("%Y-%m-%d"),
             "description": doc.get("description", "")
         })
-        
-    return {"data": data}
+    return {"data": data, "pagination": {"page": page, "limit": limit, "total": total}}
 
-@app.get("/health-score")
-def get_health_score(user_id: str = Depends(get_current_user)):
-    from bson import ObjectId
-    query = {"userId": ObjectId(user_id)}
-    transactions = list(db.transactions.find(query))
+# --- CHALLENGE REQUIRED: GET /summary ---
+@app.get("/summary")
+def get_summary(user_id: str = Depends(get_current_user)):
+    now = datetime.utcnow()
+    start_of_month = datetime(now.year, now.month, 1)
     
-    # 1. Varavu, Selavu, Investment ellam kooturathu (Sum calculation)
-    total_income = sum(t["amount"] for t in transactions if t.get("type") == "income")
-    total_expense = sum(t["amount"] for t in transactions if t.get("type") == "expense")
-    total_investment = sum(t["amount"] for t in transactions if t.get("type") == "investment")
+    txns = list(db.transactions.find({"userId": ObjectId(user_id), "date": {"$gte": start_of_month}}))
     
-    # 2. Health Score Logic
-    if total_income == 0:
-        score = 0
-        status = "Need Data"
-        tip = "Please add your income to calculate the health score."
-    else:
-        # Meetham irukkum panam (Savings)
-        savings = total_income - total_expense
-        savings_percentage = (savings / total_income) * 100
-        
-        if savings_percentage >= 30:
-            score = 90
-            status = "Excellent"
-            tip = "Great job! You have a very healthy savings rate. Keep investing!"
-        elif savings_percentage >= 15:
-            score = 70
-            status = "Good"
-            tip = "You are doing well, but try to cut down unnecessary expenses to reach a 30% savings rate."
-        elif savings_percentage >= 0:
-            score = 50
-            status = "Needs Improvement"
-            tip = "Warning: You are spending almost everything you earn. Start budgeting!"
-        else:
-            score = 30
-            status = "Critical"
-            tip = "DANGER: You are spending more than you earn! High risk of debt."
-            
+    income = sum(t["amount"] for t in txns if t["type"] == "income")
+    expense = sum(t["amount"] for t in txns if t["type"] == "expense")
+    savings = income - expense
+    rate = round((savings / income * 100), 1) if income > 0 else 0
+    
+    categories = {}
+    for t in txns:
+        if t["type"] == "expense":
+            categories[t["category"]] = categories.get(t["category"], 0) + t["amount"]
+
     return {
-        "total_income": total_income,
-        "total_expense": total_expense,
-        "total_investment": total_investment,
-        "savings_percentage": round(savings_percentage, 2) if total_income > 0 else 0,
-        "health_score": score,
-        "status": status,
-        "financial_tip": tip
+        "income": income, "expense": expense, "savings": savings,
+        "savingsRate": rate, "categories": categories
+    }
+
+# --- CHALLENGE REQUIRED: GET /financial-health (The Algorithm) ---
+@app.get("/financial-health")
+def get_financial_health(user_id: str = Depends(get_current_user)):
+    oid = ObjectId(user_id)
+    now = datetime.utcnow()
+    start_of_month = datetime(now.year, now.month, 1)
+
+    all_txns = list(db.transactions.find({"userId": oid}))
+    this_month = [t for t in all_txns if t["date"] >= start_of_month]
+
+    # Metrics
+    total_savings = sum(t["amount"] if t["type"] == "income" else -t["amount"] for t in all_txns)
+    monthly_income = sum(t["amount"] for t in this_month if t["type"] == "income")
+    monthly_expense = sum(t["amount"] for t in this_month if t["type"] == "expense")
+    monthly_debt = sum(t["amount"] for t in this_month if t["type"] == "debt")
+    monthly_invest = sum(t["amount"] for t in this_month if t["type"] == "investment")
+
+    # 1. Emergency Fund (max 25)
+    coverage = total_savings / monthly_expense if monthly_expense > 0 else 99
+    ef_pts = 25 if coverage > 6 else (20 if coverage >= 3 else (10 if coverage >= 1 else 5))
+
+    # 2. Savings Rate (max 25)
+    s_rate = ((monthly_income - monthly_expense) / monthly_income * 100) if monthly_income > 0 else 0
+    s_pts = 25 if s_rate > 40 else (20 if s_rate >= 20 else (10 if s_rate >= 10 else 5))
+
+    # 3. Debt Ratio (max 25)
+    d_ratio = (monthly_debt / monthly_income * 100) if monthly_income > 0 else 0
+    d_pts = 25 if d_ratio < 10 else (20 if d_ratio <= 30 else (10 if d_ratio <= 50 else 5))
+
+    # 4. Investment Ratio (max 25)
+    i_ratio = (monthly_invest / monthly_income * 100) if monthly_income > 0 else 0
+    i_pts = 25 if i_ratio > 30 else (20 if i_ratio >= 15 else (10 if i_ratio >= 5 else 5))
+
+    score = ef_pts + s_pts + d_pts + i_pts
+    category = "Excellent" if score >= 80 else ("Healthy" if score >= 60 else ("Moderate" if score >= 40 else "At Risk"))
+
+    suggestions = []
+    if ef_pts < 20: suggestions.append("Increase emergency fund to cover 3-6 months.")
+    if i_pts < 20: suggestions.append("Try to invest at least 15% of your income.")
+
+    return {
+        "score": score, "category": category,
+        "breakdown": {"emergencyFund": ef_pts, "savingsRate": s_pts, "debtRatio": d_pts, "investmentRatio": i_pts},
+        "suggestions": suggestions
     }
